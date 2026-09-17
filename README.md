@@ -20,28 +20,99 @@ The first version should focus on:
 
 Later versions can add repository management, configuration, shell integration, and more advanced variable behavior.
 
+## Current State
+
+Phases 1 and 2 are implemented: `nav` parses flags, loads `.cheat` files from a
+directory, and can list what it found. Interactive search (Phase 3) is next.
+
+```text
+$ nav --list
+git,branch: Show the current branch name
+    git rev-parse --abbrev-ref HEAD
+...
+```
+
+### Usage
+
+```text
+nav [flags]
+
+  -h, --help          show this help text and exit
+  -V, --version       print the nav version and exit
+      --path <dir>    directory to load .cheat files from (default "cheats")
+      --list          print every cheat that was loaded
+```
+
+Exit codes: `0` success, `1` error, `2` incorrect usage.
+
+### Cheatsheet File Format
+
+Cheatsheets are plain-text `*.cheat` files. There are four kinds of line:
+
+```text
+; A comment for whoever reads the file. Ignored by nav.
+% git, branch
+
+# Show the current branch name
+git rev-parse --abbrev-ref HEAD
+
+# Delete a local branch
+git branch -d <branch>
+```
+
+- `%` — a comma-separated tag list. Applies to every cheat below it until the
+  next `%` line.
+- `#` — the description of the command on the next line. Consecutive `#` lines
+  are joined with a space.
+- `;` — a comment, ignored. Blank lines are ignored too, except that they end a
+  block.
+- Anything else is a command.
+
+Every command needs its own `#` description directly above it, and a `%` line
+must come before the first command in a file. Violations are reported as
+`file:line: message`; valid cheats in the same file are still loaded.
+
+`<variable>` placeholders are recognised as part of the command text for now —
+prompting for their values is Phase 4.
+
+### Project Layout
+
+```text
+main.go                      thin wrapper around cli.Main
+internal/cli/                flag parsing, help/version, exit codes
+internal/cheat/              the Cheat model, the parser, directory loading
+cheats/                      example cheatsheets
+```
+
+### Building and Testing
+
+```sh
+go build -o nav .
+go test ./...
+```
+
 ## TODO
 
 ### Phase 1 — Basic Go CLI
 
-- [ ] Create the basic `nav` command
-- [ ] Add command-line argument parsing
-- [ ] Add `--help`
-- [ ] Add `--version`
-- [ ] Add basic error handling
-- [ ] Add unit tests
-- [ ] Establish a simple Go project/package structure
+- [x] Create the basic `nav` command
+- [x] Add command-line argument parsing
+- [x] Add `--help`
+- [x] Add `--version`
+- [x] Add basic error handling
+- [x] Add unit tests
+- [x] Establish a simple Go project/package structure
 
 ### Phase 2 — Cheatsheet Files
 
-- [ ] Define a simple cheatsheet file format
-- [ ] Load cheatsheets from a local directory
-- [ ] Support multiple cheatsheets
-- [ ] Parse cheat titles/tags
-- [ ] Parse descriptions
-- [ ] Parse executable command lines
-- [ ] Ignore comments and blank lines
-- [ ] Report useful parsing errors
+- [x] Define a simple cheatsheet file format
+- [x] Load cheatsheets from a local directory
+- [x] Support multiple cheatsheets
+- [x] Parse cheat titles/tags
+- [x] Parse descriptions
+- [x] Parse executable command lines
+- [x] Ignore comments and blank lines
+- [x] Report useful parsing errors
 
 ### Phase 3 — Search and Selection
 

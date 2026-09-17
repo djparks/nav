@@ -1,0 +1,19 @@
+; Git cheats. Lines starting with ';' are ignored by nav.
+% git, branch
+
+# Show the current branch name
+git rev-parse --abbrev-ref HEAD
+
+# List local branches sorted by last commit
+git branch --sort=-committerdate
+
+# Delete a local branch
+git branch -d <branch>
+
+% git, log
+
+# Show a compact one-line history
+git log --oneline --graph --decorate -n <count>
+
+# Show what changed in a single commit
+git show <commit>

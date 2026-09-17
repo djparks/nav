@@ -1,0 +1,19 @@
+% docker, containers
+
+# List running containers
+# in the chosen output format
+docker ps --format "<format>"
+
+# List every container, running or not
+docker ps -a
+
+# Follow the logs of a container
+docker logs -f <container>
+
+% docker, images
+
+# List local images
+docker images
+
+# Remove unused images, containers and networks
+docker system prune -f
