@@ -208,11 +208,12 @@ func TestAllCheatsUnusableIsAnError(t *testing.T) {
 
 func TestPrintSelected(t *testing.T) {
 	var buf bytes.Buffer
-	printSelected(&buf, cheat.Cheat{
+	c := cheat.Cheat{
 		Tags:        []string{"git", "branch"},
 		Description: "Show the current branch",
 		Command:     "git rev-parse --abbrev-ref HEAD",
-	})
+	}
+	printSelected(&buf, c, c.Command)
 
 	got := buf.String()
 	// The command must be on a line of its own, with no prefix, so the
@@ -224,5 +225,24 @@ func TestPrintSelected(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("output is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestPrintSelectedShowsTheFilledCommand(t *testing.T) {
+	// printSelected prints the completed command, not the template, so a
+	// filled-in value reaches the user rather than the placeholder.
+	var buf bytes.Buffer
+	printSelected(&buf, cheat.Cheat{
+		Tags:        []string{"docker"},
+		Description: "List containers",
+		Command:     `docker ps --format "<format>"`,
+	}, `docker ps --format "json"`)
+
+	got := buf.String()
+	if !strings.Contains(got, `docker ps --format "json"`) {
+		t.Errorf("output does not contain the filled command:\n%s", got)
+	}
+	if strings.Contains(got, "<format>") {
+		t.Errorf("output still contains the placeholder:\n%s", got)
 	}
 }

@@ -1,12 +1,15 @@
 // Package cheat defines the cheatsheet data model and the parser for
 // `.cheat` files.
 //
-// A cheatsheet file is plain text. Four kinds of lines exist:
+// A cheatsheet file is plain text. Five kinds of lines exist:
 //
 //	% git, version-control      tags for every cheat that follows
 //	# Show the current branch   description of the next command
 //	git rev-parse --abbrev-ref HEAD
 //	; anything after a semicolon is ignored
+//	$ branch:                   predefined values for <branch>, one per
+//	    main                    indented line below
+//	    develop
 //
 // Blank lines and `;` comments are ignored. Every command line must be
 // preceded by at least one `#` description line, and a `%` tags line must
@@ -29,6 +32,13 @@ type Cheat struct {
 	Source string
 	// Line is the 1-based line number of the command within Source.
 	Line int
+	// Values holds the predefined values for `<variable>` placeholders,
+	// keyed by variable name, as declared by the `$ name:` blocks in the
+	// same `%` tag section. It is nil when the section declared none.
+	//
+	// The map is shared by every cheat in a section and must be treated as
+	// read-only.
+	Values map[string][]string
 }
 
 // String renders the cheat the way it is shown in a selection list:

@@ -141,7 +141,7 @@ func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) e
 		copyFn = clipboard.Copy
 	}
 
-	result, err := ui.RunTTY(cheats, query, copyFn)
+	outcome, err := ui.Interact(cheats, query, copyFn)
 	if errors.Is(err, ui.ErrNoTerminal) {
 		matches := search.Filter(cheats, query)
 		if len(matches) == 0 {
@@ -155,24 +155,25 @@ func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) e
 		return err
 	}
 
-	if !result.Selected {
+	if !outcome.Selected {
 		// Quitting is a normal way to leave the selector, not a failure.
-		if result.Copied {
+		if outcome.Copied {
 			fmt.Fprintln(stderr, "nav: command copied to the clipboard")
 		}
 		return nil
 	}
 
-	printSelected(stdout, result.Cheat)
+	printSelected(stdout, outcome.Cheat, outcome.Command)
 	return nil
 }
 
-// printSelected shows the chosen cheat. The command goes on a line of its
-// own so it can be piped or copied; the metadata goes above it.
-func printSelected(w io.Writer, c cheat.Cheat) {
+// printSelected shows the chosen cheat with its variables filled in. The
+// command goes on a line of its own so it can be piped or copied; the
+// metadata goes above it, commented out.
+func printSelected(w io.Writer, c cheat.Cheat, command string) {
 	fmt.Fprintf(w, "# %s\n", c.Description)
 	fmt.Fprintf(w, "# tags: %s\n", strings.Join(c.Tags, ", "))
-	fmt.Fprintf(w, "%s\n", c.Command)
+	fmt.Fprintf(w, "%s\n", command)
 }
 
 // noMatchesError explains that a search came up empty.
@@ -196,7 +197,8 @@ Usage:
   nav [flags]
 
 Running nav with no flags opens an interactive list that filters as you type.
-Pick a cheat with Enter to print it, or copy it straight to the clipboard.
+Pick a cheat with Enter and nav asks for any <variable> values its command
+needs, then prints the completed command.
 
 Flags:
   -h, --help          show this help text and exit
@@ -209,10 +211,29 @@ Keys in the interactive list:
   type              filter the list
   up/down, ^P/^N    move the highlight
   page up/down      move a screenful
-  enter             select the highlighted cheat and print it
-  ^Y                copy the highlighted command to the clipboard
+  enter             select the highlighted cheat
+  ^Y                copy the highlighted command to the clipboard, as written
   ^W / ^U           delete the last word / clear the search box
   esc or ^C         quit without selecting
+
+Variables:
+  A command may contain <placeholder> parts. After a cheat is selected nav
+  asks for each one in turn, showing the command as it fills in. A variable
+  with predefined values gets a filterable list; anything else gets a text
+  box. Typing a value the list does not contain is allowed: the predefined
+  values are suggestions, not a restriction.
+
+  Predefined values are declared in the cheatsheet with a "$ name:" block,
+  one value per indented line:
+
+    # List running containers
+    docker ps --format "<format>"
+
+    $ format:
+        table {{.Names}}
+        json
+
+  A "$" block applies to every cheat in its %% tag section.
 
 Search terms are matched case-insensitively against a cheat's tags,
 description and command text. Every term must match, in any order, so
@@ -227,6 +248,8 @@ Cheatsheet format (*%s files):
   # Show the current branch name      description of the next command
   git rev-parse --abbrev-ref HEAD     the command itself
   ; this line is a comment            ignored, as are blank lines
+  $ branch:                           predefined values for <branch>,
+      main                            one per indented line
 
 Exit codes:
   0  success

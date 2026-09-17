@@ -10,6 +10,14 @@ docker ps -a
 # Follow the logs of a container
 docker logs -f <container>
 
+; Predefined values for the variables above. One per indented line, so a
+; value may contain commas, pipes and colons without any escaping.
+$ format:
+    table {{.Names}}\t{{.Status}}
+    table {{.Names}}\t{{.Image}}\t{{.Ports}}
+    json
+    {{.Names}}
+
 % docker, images
 
 # List local images

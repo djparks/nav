@@ -21,10 +21,10 @@ Later versions can add repository management, configuration, shell integration, 
 
 ## Current State
 
-Phases 1 to 3 are implemented. Running `nav` opens an interactive list that
-filters as you type; Enter prints the chosen cheat and `Ctrl-Y` copies its
-command to the clipboard. Variable substitution (Phase 4) is next, so a
-command containing `<placeholder>` is still printed with the placeholder in it.
+Phases 1 to 4 are implemented. Running `nav` opens an interactive list that
+filters as you type. Enter picks a cheat, nav asks for any `<variable>` values
+its command needs, and the completed command is printed. Executing it
+(Phase 5) is next, so for now the command is printed for you to run yourself.
 
 ```text
 Search: docker
@@ -37,6 +37,24 @@ Search: docker
     docker images
 
 2 of 5 matched   ↑↓ move   ⏎ select   ^Y copy   esc quit
+```
+
+Selecting a command with a `<variable>` in it asks for the value, offering any
+predefined ones as a filterable list:
+
+```text
+Command:
+  docker ps --format "<format>"
+
+format:
+
+
+> table {{.Names}}\t{{.Status}}
+  table {{.Names}}\t{{.Image}}\t{{.Ports}}
+  json
+  {{.Names}}
+
+variable 1 of 1   1 of 4   ↑↓ move   ⏎ accept   esc cancel
 ```
 
 ### Usage
@@ -60,8 +78,8 @@ Exit codes: `0` success, `1` error, `2` incorrect usage.
 | type | filter the list |
 | up/down, `Ctrl-P`/`Ctrl-N` | move the highlight |
 | page up/down, home/end | move a screenful, or jump to either end |
-| Enter | select the highlighted cheat and print it |
-| `Ctrl-Y` | copy the highlighted command to the clipboard |
+| Enter | select the highlighted cheat |
+| `Ctrl-Y` | copy the highlighted command to the clipboard, as written |
 | `Ctrl-W` / `Ctrl-U` | delete the last word / clear the search box |
 | Esc or `Ctrl-C` | quit without selecting |
 
@@ -70,6 +88,26 @@ key — `q` is a search character.
 
 Copying shells out to `pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on Linux and
 `clip` on Windows. If none is installed, `Ctrl-Y` says so instead of failing.
+`Ctrl-Y` copies the command as written, placeholders included; filling those
+in happens after a cheat is selected.
+
+The same keys work in the variable prompts, where Enter accepts the value and
+Esc abandons the command.
+
+### Variables
+
+A command may contain `<placeholder>` parts. Once a cheat is selected, nav asks
+for each one in the order it appears, previewing the command with the values
+chosen so far filled in. A variable used twice is asked for once.
+
+A name starts with a letter or underscore and continues with letters, digits,
+underscores or hyphens. Requiring that shape keeps ordinary shell syntax from
+being mistaken for a variable — `sort < in > out`, `diff <(a) <(b)` and
+`[ $x -lt $y ]` all contain a `<` that is not a placeholder.
+
+Predefined values are optional. A variable that has them gets a filterable
+list; one that does not gets a text box. Typing a value the list does not
+contain is allowed — predefined values are suggestions, not a restriction.
 
 ### Searching
 
@@ -90,7 +128,7 @@ rather than failing.
 
 ### Cheatsheet File Format
 
-Cheatsheets are plain-text `*.cheat` files. There are four kinds of line:
+Cheatsheets are plain-text `*.cheat` files. There are five kinds of line:
 
 ```text
 ; A comment for whoever reads the file. Ignored by nav.
@@ -101,6 +139,10 @@ git rev-parse --abbrev-ref HEAD
 
 # Delete a local branch
 git branch -d <branch>
+
+$ branch:
+    main
+    develop
 ```
 
 - `%` — a comma-separated tag list. Applies to every cheat below it until the
@@ -109,14 +151,24 @@ git branch -d <branch>
   are joined with a space.
 - `;` — a comment, ignored. Blank lines are ignored too, except that they end a
   block.
+- `$ name:` — predefined values for the variable `<name>`, one per indented
+  line below it. The block ends at the first line that is not indented.
 - Anything else is a command.
 
 Every command needs its own `#` description directly above it, and a `%` line
 must come before the first command in a file. Violations are reported as
 `file:line: message`; valid cheats in the same file are still loaded.
 
-`<variable>` placeholders are recognised as part of the command text for now —
-prompting for their values is Phase 4.
+A `$` block applies to every cheat in its `%` tag section, including ones
+written above the block, so several commands can share one variable's values.
+Declaring the same name twice in a section adds to its values rather than
+replacing them.
+
+Because there is one value per line, values need no escaping — a value may
+contain commas, pipes, colons and tabs, which matters because format strings
+are exactly what this feature tends to be used for. Indentation is only
+meaningful directly below a `$` line; elsewhere it is ignored, so an indented
+command still works.
 
 ### Project Layout
 
@@ -125,7 +177,8 @@ main.go                      thin wrapper around cli.Main
 internal/cli/                flag parsing, help/version, exit codes
 internal/cheat/              the Cheat model, the parser, directory loading
 internal/search/             filtering cheats by a text query
-internal/ui/                 the interactive selector and its key decoder
+internal/variables/          finding and substituting <placeholder> parts
+internal/ui/                 the interactive screens and their key decoder
 internal/term/               raw terminal mode and window size
 internal/clipboard/          copying text to the system clipboard
 cheats/                      example cheatsheets
@@ -136,11 +189,18 @@ top of the standard library's `syscall` package — the job `golang.org/x/term`
 would otherwise do — with per-platform `ioctl` constants behind build tags and
 a stub that reports "unsupported" on Windows and Plan 9.
 
-The selector is deliberately split in two. `internal/ui/selector.go` only
-reads keypress bytes from an `io.Reader` and writes frames to an `io.Writer`,
-so filtering, scrolling, copying and rendering are all unit-testable without a
-terminal. `internal/ui/tty.go` is the thin layer that puts a real terminal
-into raw mode and hands it those two interfaces.
+The interactive code is deliberately split in two. The screens in
+`internal/ui` — the cheat selector and the variable prompt — only read
+keypress bytes from an `io.Reader` and write frames to an `io.Writer`, so
+filtering, scrolling, copying, prompting and rendering are all unit-testable
+without a terminal. `internal/ui/tty.go` is the thin layer that puts a real
+terminal into raw mode and hands it those two interfaces.
+
+Both screens implement the same small `view` interface and share one event
+loop and one input reader. Sharing the reader is not just tidiness: a terminal
+hands over everything typed so far in a single read, so one read can contain
+the Enter that finishes the cheat list along with the first characters meant
+for the variable prompt. A reader per screen would discard those.
 
 ### Building and Testing
 
@@ -188,13 +248,13 @@ go test ./...
 
 ### Phase 4 — Variables
 
-- [ ] Support variables using `<variable>` syntax
-- [ ] Detect variables used by a command
-- [ ] Prompt the user for variable values
-- [ ] Replace variables in the command
-- [ ] Support for predefined variable values
-- [ ] Allow selecting a predefined value
-- [ ] Handle multiple variables in one command
+- [x] Support variables using `<variable>` syntax
+- [x] Detect variables used by a command
+- [x] Prompt the user for variable values
+- [x] Replace variables in the command
+- [x] Support for predefined variable values
+- [x] Allow selecting a predefined value
+- [x] Handle multiple variables in one command
 
 ### Phase 5 — Execute Commands
 

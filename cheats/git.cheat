@@ -17,3 +17,8 @@ git log --oneline --graph --decorate -n <count>
 
 # Show what changed in a single commit
 git show <commit>
+
+$ count:
+    10
+    25
+    50

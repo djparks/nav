@@ -1,11 +1,11 @@
-// Package ui implements nav's interactive cheat selector: a list that
-// filters as you type, moves with the arrow keys, and copies the highlighted
-// command to the clipboard.
+// Package ui implements nav's interactive screens: the cheat selector, which
+// filters a list as you type, and the prompts that fill in a command's
+// `<variable>` placeholders.
 //
-// The selector is split into a pure part and a terminal part. The model in
-// this file only ever reads keys from an io.Reader and writes frames to an
-// io.Writer, so the whole interaction can be driven from a test. Putting the
-// real terminal into raw mode lives in tty.go.
+// The package is split into a pure part and a terminal part. The views here
+// only ever read keys from an io.Reader and write frames to an io.Writer, so
+// the whole interaction can be driven from a test. Putting the real terminal
+// into raw mode lives in tty.go.
 package ui
 
 import (
@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"nav/internal/cheat"
 	"nav/internal/search"
@@ -28,7 +27,7 @@ const rowsPerEntry = 2
 // line, a blank line, and the help/status footer.
 const reservedRows = 4
 
-// Result reports what the user did.
+// Result reports what the user did in the selector.
 type Result struct {
 	// Cheat is the highlighted cheat when Selected is true.
 	Cheat cheat.Cheat
@@ -71,40 +70,17 @@ type selector struct {
 	out  io.Writer
 }
 
-// action is what the event loop should do after handling a key.
-type action int
-
-const (
-	actionContinue action = iota
-	actionSelect
-	actionQuit
-)
-
-// escDelay is how long the selector waits for the rest of an escape
-// sequence before concluding that the user pressed Esc on its own.
-//
-// Pressing Esc and pressing the up arrow both start with the same byte. The
-// only thing that distinguishes them is that the arrow's remaining bytes
-// follow immediately, so telling them apart needs a short wait. Terminals
-// send the whole sequence in one burst, and no human can type a second key
-// this fast, which makes the wait invisible in practice.
-var escDelay = 50 * time.Millisecond
-
-// readResult is one delivery from the input-reading goroutine.
-type readResult struct {
-	data []byte
-	err  error
-}
-
 // Run shows the selector and blocks until the user selects a cheat or quits.
-//
-// Running out of input — a closed pipe, or the end of a scripted test input —
-// is treated as quitting, not as an error.
 func Run(cheats []cheat.Cheat, opts Options) (Result, error) {
 	if opts.Input == nil || opts.Output == nil {
 		return Result{}, errors.New("ui.Run: Input and Output are required")
 	}
+	return runSelector(newKeyReader(opts.Input), cheats, opts)
+}
 
+// runSelector is Run with the input reader supplied by the caller, so a
+// session can share one reader across the list and the prompts that follow.
+func runSelector(kr *keyReader, cheats []cheat.Cheat, opts Options) (Result, error) {
 	size := opts.Size
 	if size == nil {
 		size = func() term.Size { return term.FallbackSize }
@@ -119,123 +95,31 @@ func Run(cheats []cheat.Cheat, opts Options) (Result, error) {
 	}
 	s.refilter()
 
-	if err := s.render(); err != nil {
+	act, err := runLoop(kr, s)
+	if err != nil {
 		return Result{}, err
 	}
-
-	// Reading happens on its own goroutine so the main loop can put a
-	// deadline on "is more of this escape sequence coming?". The goroutine
-	// ends when the input reports an error, which happens when the caller
-	// closes the terminal after Run returns.
-	reads := make(chan readResult, 4)
-	go readInput(opts.Input, reads)
-
-	// apply feeds one key to the selector. done is true when Run should
-	// return, carrying the result.
-	apply := func(k key) (result Result, done bool, err error) {
-		switch s.handle(k) {
-		case actionSelect:
-			return Result{Cheat: s.matches[s.cursor], Selected: true, Copied: s.copied}, true, nil
-		case actionQuit:
-			return Result{Copied: s.copied}, true, nil
-		}
-		if err := s.render(); err != nil {
-			return Result{}, true, err
-		}
-		return Result{}, false, nil
+	if act == actionAccept {
+		return Result{Cheat: s.matches[s.cursor], Selected: true, Copied: s.copied}, nil
 	}
-
-	// pending holds bytes that have arrived but not yet formed a whole key.
-	var pending []byte
-	var inputErr error
-
-	for {
-		// Handle every key the buffered bytes already contain.
-		for {
-			k, used, ok := decode(pending)
-			if !ok {
-				break
-			}
-			pending = pending[used:]
-			if result, done, err := apply(k); done {
-				return result, err
-			}
-		}
-
-		// pending is now either empty or an incomplete sequence.
-		if inputErr != nil {
-			if len(pending) > 0 {
-				// Nothing more is coming, so take the leftover at face value.
-				k, used := decodeFinal(pending)
-				pending = pending[used:]
-				if result, done, err := apply(k); done {
-					return result, err
-				}
-				continue
-			}
-			if errors.Is(inputErr, io.EOF) {
-				return Result{Copied: s.copied}, nil
-			}
-			return Result{}, inputErr
-		}
-
-		var res readResult
-		if len(pending) > 0 {
-			// Waiting on the rest of a sequence: give up after escDelay and
-			// take the bytes at face value.
-			timer := time.NewTimer(escDelay)
-			select {
-			case res = <-reads:
-				timer.Stop()
-			case <-timer.C:
-				k, used := decodeFinal(pending)
-				pending = pending[used:]
-				if result, done, err := apply(k); done {
-					return result, err
-				}
-				continue
-			}
-		} else {
-			res = <-reads
-		}
-
-		pending = append(pending, res.data...)
-		if res.err != nil {
-			inputErr = res.err
-		}
-	}
+	return Result{Copied: s.copied}, nil
 }
 
-// readInput copies keypress bytes from r onto ch until r fails.
-func readInput(r io.Reader, ch chan<- readResult) {
-	for {
-		buf := make([]byte, 64)
-		n, err := r.Read(buf)
-		if n > 0 {
-			ch <- readResult{data: buf[:n]}
-		}
-		if err != nil {
-			ch <- readResult{err: err}
-			return
-		}
-	}
-}
-
-// handle applies one keypress to the selector.
-func (s *selector) handle(k key) action {
+// handleKey applies one keypress to the selector.
+func (s *selector) handleKey(k key) action {
 	// Any keypress clears the previous transient message.
 	s.status = ""
 
 	switch k.kind {
 	case keyQuit:
-		return actionQuit
+		return actionCancel
 
 	case keyEnter:
 		if len(s.matches) == 0 {
 			s.status = "no matches"
 			return actionContinue
 		}
-		return actionSelect
+		return actionAccept
 
 	case keyCopy:
 		s.doCopy()
@@ -276,6 +160,9 @@ func (s *selector) handle(k key) action {
 }
 
 // doCopy puts the highlighted command on the clipboard.
+//
+// The command is copied exactly as written, so any `<variable>` placeholders
+// are copied too. Filling them in happens after a cheat is selected.
 func (s *selector) doCopy() {
 	if len(s.matches) == 0 {
 		s.status = "nothing to copy"
@@ -319,28 +206,7 @@ func (s *selector) refilter() {
 // moveCursor moves the highlight by delta entries, clamping at both ends,
 // and scrolls the window to keep the highlight visible.
 func (s *selector) moveCursor(delta int) {
-	if len(s.matches) == 0 {
-		return
-	}
-
-	s.cursor += delta
-	if s.cursor < 0 {
-		s.cursor = 0
-	}
-	if s.cursor > len(s.matches)-1 {
-		s.cursor = len(s.matches) - 1
-	}
-
-	visible := s.visibleEntries()
-	if s.cursor < s.offset {
-		s.offset = s.cursor
-	}
-	if s.cursor >= s.offset+visible {
-		s.offset = s.cursor - visible + 1
-	}
-	if s.offset < 0 {
-		s.offset = 0
-	}
+	s.cursor, s.offset = moveInList(s.cursor, s.offset, delta, len(s.matches), s.visibleEntries())
 }
 
 // visibleEntries is how many cheats fit on screen at the current size.
@@ -352,54 +218,23 @@ func (s *selector) visibleEntries() int {
 	return rows / rowsPerEntry
 }
 
-// ANSI escape sequences. Kept as named constants so render stays readable.
-const (
-	ansiHome       = "\x1b[H"      // move the cursor to the top-left
-	ansiClearBelow = "\x1b[J"      // erase from the cursor to the end of screen
-	ansiClearLine  = "\x1b[K"      // erase from the cursor to the end of line
-	ansiReverse    = "\x1b[7m"     // swap foreground and background
-	ansiDim        = "\x1b[2m"     // reduced intensity
-	ansiBold       = "\x1b[1m"     // bold
-	ansiReset      = "\x1b[0m"     // back to normal
-	ansiHideCursor = "\x1b[?25l"   // hide the hardware cursor
-	ansiShowCursor = "\x1b[?25h"   // show it again
-	ansiEnterAlt   = "\x1b[?1049h" // switch to the alternate screen
-	ansiExitAlt    = "\x1b[?1049l" // switch back, restoring the user's screen
-)
-
 // render draws one frame.
 func (s *selector) render() error {
 	size := s.size()
-	width := size.Cols
-	if width < 20 {
-		width = 20
-	}
+	width := max(size.Cols, 20)
 
-	var b strings.Builder
-	b.WriteString(ansiHome)
-
-	// line writes one screen row. Callers truncate the plain text they pass
-	// in; line itself must not, because ANSI codes occupy no columns and
-	// would be miscounted as width.
-	line := func(text string) {
-		b.WriteString(text)
-		b.WriteString(ansiClearLine)
-		// Raw mode does not translate \n, so the \r is required.
-		b.WriteString("\r\n")
-	}
+	sc := newScreen(width)
 
 	const prompt = "Search: "
-	line(ansiBold + prompt + ansiReset + truncate(string(s.query), width-len(prompt)))
-	line("")
+	sc.line(ansiBold + prompt + ansiReset + truncate(string(s.query), width-len(prompt)))
+	sc.line("")
 
 	visible := s.visibleEntries()
 	end := min(s.offset+visible, len(s.matches))
 
 	if len(s.matches) == 0 {
-		line(ansiDim + "  no cheats match" + ansiReset)
-		for i := 1; i < visible*rowsPerEntry; i++ {
-			line("")
-		}
+		sc.line(ansiDim + "  no cheats match" + ansiReset)
+		sc.blank(visible*rowsPerEntry - 1)
 	} else {
 		for i := s.offset; i < end; i++ {
 			c := s.matches[i]
@@ -407,26 +242,21 @@ func (s *selector) render() error {
 			if i == s.cursor {
 				// Truncate before adding colour so the escape codes, which
 				// occupy no screen columns, are not counted as width.
-				line(ansiReverse + "> " + truncate(header, width-2) + ansiReset)
-				line(ansiBold + "    " + truncate(c.Command, width-4) + ansiReset)
+				sc.line(ansiReverse + "> " + truncate(header, width-2) + ansiReset)
+				sc.line(ansiBold + "    " + truncate(c.Command, width-4) + ansiReset)
 			} else {
-				line("  " + truncate(header, width-2))
-				line(ansiDim + "    " + truncate(c.Command, width-4) + ansiReset)
+				sc.line("  " + truncate(header, width-2))
+				sc.line(ansiDim + "    " + truncate(c.Command, width-4) + ansiReset)
 			}
 		}
 		// Pad so the footer stays put as the match count changes.
-		for i := end - s.offset; i < visible; i++ {
-			line("")
-			line("")
-		}
+		sc.blank((visible - (end - s.offset)) * rowsPerEntry)
 	}
 
-	line("")
-	line(ansiDim + truncate(s.footer(), width) + ansiReset)
+	sc.line("")
+	sc.line(ansiDim + truncate(s.footer(), width) + ansiReset)
 
-	b.WriteString(ansiClearBelow)
-	_, err := io.WriteString(s.out, b.String())
-	return err
+	return sc.flush(s.out)
 }
 
 // footer is the bottom line, as plain text: the match count plus either a
@@ -444,19 +274,24 @@ func (s *selector) footer() string {
 	return fmt.Sprintf("%d of %d matched   %s", shown, len(s.matches), right)
 }
 
-// truncate shortens text to at most width display columns, marking a cut
-// with an ellipsis. It counts runes rather than bytes so multi-byte
-// characters are not split, and ignores any ANSI codes already present.
-func truncate(text string, width int) string {
-	if width <= 0 {
-		return ""
+// moveInList moves a highlight by delta within a list of n items, clamping at
+// both ends, and scrolls a window of the given size to keep the highlight
+// visible. It returns the new cursor and window offset.
+//
+// Both the cheat selector and the value prompt scroll this way, so the
+// arithmetic lives in one place.
+func moveInList(cursor, offset, delta, n, visible int) (int, int) {
+	if n == 0 {
+		return 0, 0
 	}
-	runes := []rune(text)
-	if len(runes) <= width {
-		return text
+
+	cursor = min(max(cursor+delta, 0), n-1)
+
+	if cursor < offset {
+		offset = cursor
 	}
-	if width == 1 {
-		return "…"
+	if cursor >= offset+visible {
+		offset = cursor - visible + 1
 	}
-	return string(runes[:width-1]) + "…"
+	return cursor, max(offset, 0)
 }
