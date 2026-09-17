@@ -120,9 +120,9 @@ go test ./...
 - [ ] Search cheats by description
 - [ ] Search cheats by command text
 - [ ] Display matching cheats interactively
-- [ ] Evaluate what `fzf` adds and see if can replace it
 - [ ] Select a cheat from the search results
 - [ ] Display the selected cheat
+- [ ] Make it so Command-c (or Control-c on windows) copies the command into copy buffer
 
 ### Phase 4 — Variables
 
