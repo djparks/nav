@@ -1,0 +1,40 @@
+# Binary outputs & builds
+# ------------------------
+bin/
+dist/
+*.exe
+*.exe?
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Dependency directory
+# --------------------
+# Uncomment if you vendor dependencies locally
+# vendor/
+
+# GoLand / JetBrains IDE
+# -----------------------
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Environment & local setup
+# -------------------------
+.env
+.env.local
+*.log
+
+# OS generated files
+# ------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
