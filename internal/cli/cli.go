@@ -11,6 +11,9 @@ import (
 	"strings"
 
 	"nav/internal/cheat"
+	"nav/internal/clipboard"
+	"nav/internal/search"
+	"nav/internal/ui"
 )
 
 // Version is the version nav reports for --version. It is overridable at
@@ -75,9 +78,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		showVersion = fs.Bool("version", false, "print the nav version and exit")
 		path        = fs.String("path", DefaultCheatDir, "directory to load .cheat files from")
 		list        = fs.Bool("list", false, "print every cheat that was loaded")
+		query       = fs.String("query", "", "search terms; pre-fills the interactive search box")
 	)
 	fs.BoolVar(showHelp, "h", false, "shorthand for --help")
 	fs.BoolVar(showVersion, "V", false, "shorthand for --version")
+	fs.StringVar(query, "q", "", "shorthand for --query")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) { // -h handled by flag itself
@@ -114,16 +119,68 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	// --list is the non-interactive path: print what matches and stop.
 	if *list {
-		printCheats(stdout, cheats)
+		matches := search.Filter(cheats, *query)
+		if len(matches) == 0 {
+			return noMatchesError(*query)
+		}
+		printCheats(stdout, matches)
 		return nil
 	}
 
-	// Searching and selecting cheats is Phase 3. Until then, say what we
-	// have rather than pretending to do more.
-	fmt.Fprintf(stdout, "Loaded %d cheat(s) from %s.\n", len(cheats), *path)
-	fmt.Fprintf(stdout, "Interactive search is not implemented yet; use --list to see them.\n")
+	return selectCheat(cheats, *query, stdout, stderr)
+}
+
+// selectCheat runs the interactive selector and prints whatever the user
+// chose. With no terminal to draw on it degrades to listing the matches, so
+// `nav -q docker | ...` still does something sensible.
+func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) error {
+	var copyFn func(string) error
+	if clipboard.Available() {
+		copyFn = clipboard.Copy
+	}
+
+	result, err := ui.RunTTY(cheats, query, copyFn)
+	if errors.Is(err, ui.ErrNoTerminal) {
+		matches := search.Filter(cheats, query)
+		if len(matches) == 0 {
+			return noMatchesError(query)
+		}
+		fmt.Fprintf(stderr, "nav: no terminal available, listing %d matching cheat(s) instead\n", len(matches))
+		printCheats(stdout, matches)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if !result.Selected {
+		// Quitting is a normal way to leave the selector, not a failure.
+		if result.Copied {
+			fmt.Fprintln(stderr, "nav: command copied to the clipboard")
+		}
+		return nil
+	}
+
+	printSelected(stdout, result.Cheat)
 	return nil
+}
+
+// printSelected shows the chosen cheat. The command goes on a line of its
+// own so it can be piped or copied; the metadata goes above it.
+func printSelected(w io.Writer, c cheat.Cheat) {
+	fmt.Fprintf(w, "# %s\n", c.Description)
+	fmt.Fprintf(w, "# tags: %s\n", strings.Join(c.Tags, ", "))
+	fmt.Fprintf(w, "%s\n", c.Command)
+}
+
+// noMatchesError explains that a search came up empty.
+func noMatchesError(query string) error {
+	if query == "" {
+		return errors.New("no cheats to show")
+	}
+	return fmt.Errorf("no cheats match %q", query)
 }
 
 // printCheats writes one line per cheat, tags first, then the command.
@@ -138,11 +195,32 @@ const usageText = `nav - a small command-line cheatsheet tool
 Usage:
   nav [flags]
 
+Running nav with no flags opens an interactive list that filters as you type.
+Pick a cheat with Enter to print it, or copy it straight to the clipboard.
+
 Flags:
   -h, --help          show this help text and exit
   -V, --version       print the nav version and exit
-      --path <dir>    directory to load .cheat files from (default "%s")
-      --list          print every cheat that was loaded
+      --path <dir>    directory to load %s files from (default "%s")
+  -q, --query <text>  search terms; pre-fills the interactive search box
+      --list          print matching cheats and exit, without the interactive list
+
+Keys in the interactive list:
+  type              filter the list
+  up/down, ^P/^N    move the highlight
+  page up/down      move a screenful
+  enter             select the highlighted cheat and print it
+  ^Y                copy the highlighted command to the clipboard
+  ^W / ^U           delete the last word / clear the search box
+  esc or ^C         quit without selecting
+
+Search terms are matched case-insensitively against a cheat's tags,
+description and command text. Every term must match, in any order, so
+"docker ps" finds cheats mentioning both. A term can be limited to one field:
+
+  nav -q 'tag:git branch'     'branch' may match anywhere, 'git' only in tags
+  nav -q 'cmd:rev-parse'      match only against the command text
+  nav -q 'desc:current'       match only against the description
 
 Cheatsheet format (*%s files):
   %% git, branch                       tags for the cheats that follow
@@ -157,7 +235,8 @@ Exit codes:
 `
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, strings.TrimLeft(fmt.Sprintf(usageText, DefaultCheatDir, cheat.Extension), "\n"))
+	fmt.Fprint(w, strings.TrimLeft(fmt.Sprintf(usageText,
+		cheat.Extension, DefaultCheatDir, cheat.Extension), "\n"))
 }
 
 // Main is the thin wrapper main() calls.

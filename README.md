@@ -14,7 +14,6 @@ The first version should focus on:
 - Simple tags/categories
 - Searching and selecting cheats
 - Simple `<variable>` substitution
-- Interactive selection using `fzf`
 - Displaying the resulting command
 - Optional command execution
 
@@ -22,14 +21,22 @@ Later versions can add repository management, configuration, shell integration, 
 
 ## Current State
 
-Phases 1 and 2 are implemented: `nav` parses flags, loads `.cheat` files from a
-directory, and can list what it found. Interactive search (Phase 3) is next.
+Phases 1 to 3 are implemented. Running `nav` opens an interactive list that
+filters as you type; Enter prints the chosen cheat and `Ctrl-Y` copies its
+command to the clipboard. Variable substitution (Phase 4) is next, so a
+command containing `<placeholder>` is still printed with the placeholder in it.
 
 ```text
-$ nav --list
-git,branch: Show the current branch name
-    git rev-parse --abbrev-ref HEAD
-...
+Search: docker
+
+  docker,containers  List running containers in the chosen output format
+    docker ps --format "<format>"
+> docker,containers  List every container, running or not
+    docker ps -a
+  docker,images  List local images
+    docker images
+
+2 of 5 matched   ↑↓ move   ⏎ select   ^Y copy   esc quit
 ```
 
 ### Usage
@@ -40,10 +47,46 @@ nav [flags]
   -h, --help          show this help text and exit
   -V, --version       print the nav version and exit
       --path <dir>    directory to load .cheat files from (default "cheats")
-      --list          print every cheat that was loaded
+  -q, --query <text>  search terms; pre-fills the interactive search box
+      --list          print matching cheats and exit, without the interactive list
 ```
 
 Exit codes: `0` success, `1` error, `2` incorrect usage.
+
+### Keys in the Interactive List
+
+| Key | Action |
+| --- | --- |
+| type | filter the list |
+| up/down, `Ctrl-P`/`Ctrl-N` | move the highlight |
+| page up/down, home/end | move a screenful, or jump to either end |
+| Enter | select the highlighted cheat and print it |
+| `Ctrl-Y` | copy the highlighted command to the clipboard |
+| `Ctrl-W` / `Ctrl-U` | delete the last word / clear the search box |
+| Esc or `Ctrl-C` | quit without selecting |
+
+Printable keys all go into the search box, so there is no single-letter quit
+key — `q` is a search character.
+
+Copying shells out to `pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on Linux and
+`clip` on Windows. If none is installed, `Ctrl-Y` says so instead of failing.
+
+### Searching
+
+Terms are matched case-insensitively against a cheat's tags, description and
+command text. Every term must match, in any order, so `docker ps` finds cheats
+mentioning both. A term can be restricted to one field:
+
+```sh
+nav -q 'tag:git branch'   # 'branch' may match anywhere, 'git' only in tags
+nav -q 'cmd:rev-parse'    # match only against the command text
+nav -q 'desc:current'     # match only against the description
+```
+
+`--list` applies the same search without opening the interactive list, which
+is what you want in scripts. When there is no terminal to draw on — nav's
+input is a pipe, say — the interactive list degrades to the same listing
+rather than failing.
 
 ### Cheatsheet File Format
 
@@ -81,8 +124,23 @@ prompting for their values is Phase 4.
 main.go                      thin wrapper around cli.Main
 internal/cli/                flag parsing, help/version, exit codes
 internal/cheat/              the Cheat model, the parser, directory loading
+internal/search/             filtering cheats by a text query
+internal/ui/                 the interactive selector and its key decoder
+internal/term/               raw terminal mode and window size
+internal/clipboard/          copying text to the system clipboard
 cheats/                      example cheatsheets
 ```
+
+`nav` has no third-party dependencies. Raw terminal mode is implemented on
+top of the standard library's `syscall` package — the job `golang.org/x/term`
+would otherwise do — with per-platform `ioctl` constants behind build tags and
+a stub that reports "unsupported" on Windows and Plan 9.
+
+The selector is deliberately split in two. `internal/ui/selector.go` only
+reads keypress bytes from an `io.Reader` and writes frames to an `io.Writer`,
+so filtering, scrolling, copying and rendering are all unit-testable without a
+terminal. `internal/ui/tty.go` is the thin layer that puts a real terminal
+into raw mode and hands it those two interfaces.
 
 ### Building and Testing
 
@@ -116,13 +174,17 @@ go test ./...
 
 ### Phase 3 — Search and Selection
 
-- [ ] Search cheats by title/tag
-- [ ] Search cheats by description
-- [ ] Search cheats by command text
-- [ ] Display matching cheats interactively
-- [ ] Select a cheat from the search results
-- [ ] Display the selected cheat
-- [ ] Make it so Command-c (or Control-c on windows) copies the command into copy buffer
+- [x] Search cheats by title/tag
+- [x] Search cheats by description
+- [x] Search cheats by command text
+- [x] Display matching cheats interactively
+- [x] Select a cheat from the search results
+- [x] Display the selected cheat
+- [x] Copy the cheat command into the copy buffer — bound to `Ctrl-Y`, not
+      `Cmd-C`. A terminal program cannot see `Cmd-C` on macOS: Terminal.app,
+      iTerm2, Ghostty and WezTerm all consume `Cmd` combinations for their own
+      copy/paste before they reach the process. `Ctrl-Y` works on every
+      platform and leaves `Ctrl-C` meaning "quit", which is what people expect.
 
 ### Phase 4 — Variables
 
@@ -130,8 +192,8 @@ go test ./...
 - [ ] Detect variables used by a command
 - [ ] Prompt the user for variable values
 - [ ] Replace variables in the command
-- [ ] Support predefined variable values
-- [ ] Allow selecting a predefined value with `fzf`
+- [ ] Support for predefined variable values
+- [ ] Allow selecting a predefined value
 - [ ] Handle multiple variables in one command
 
 ### Phase 5 — Execute Commands
@@ -177,7 +239,6 @@ go test ./...
 - [ ] Support variable dependencies
 - [ ] Support aliases
 - [ ] Support command previews
-- [ ] Support richer `fzf` configuration
 - [ ] Support multiple cheatsheet formats
 - [ ] Add import/integration with external cheatsheet sources such as tldr or cheat.sh
 
@@ -197,7 +258,7 @@ The first useful version of `nav` should be able to do this:
 
 1. Read local `.cheat` files.
 2. Search the available cheats.
-3. Select a cheat with `fzf`.
+3. Select a cheat.
 4. Show the selected command.
 5. Ask the user for simple `<variable>` values.
 6. Display the completed command.

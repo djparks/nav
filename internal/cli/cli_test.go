@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"nav/internal/cheat"
 )
 
 // exec runs nav with the given args and returns the exit code, stdout and stderr.
@@ -37,7 +39,7 @@ func TestHelp(t *testing.T) {
 			if code != ExitOK {
 				t.Errorf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
 			}
-			for _, want := range []string{"Usage:", "--version", "--path", "--list"} {
+			for _, want := range []string{"Usage:", "--version", "--path", "--list", "--query", "^Y"} {
 				if !strings.Contains(stdout, want) {
 					t.Errorf("help output is missing %q:\n%s", want, stdout)
 				}
@@ -99,17 +101,66 @@ func TestListPrintsCheats(t *testing.T) {
 	}
 }
 
-func TestDefaultRunReportsWhatWasLoaded(t *testing.T) {
+func TestListHonoursQuery(t *testing.T) {
 	dir := cheatDir(t, map[string]string{
 		"a.cheat": "% shell\n# list files\nls\n# print the working directory\npwd\n",
 	})
 
-	code, stdout, stderr := exec(t, "--path", dir)
+	code, stdout, stderr := exec(t, "--path", dir, "--list", "--query", "pwd")
 	if code != ExitOK {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
 	}
-	if !strings.Contains(stdout, "Loaded 2 cheat(s)") {
-		t.Errorf("stdout = %q, want it to report 2 cheats", stdout)
+	if !strings.Contains(stdout, "pwd") {
+		t.Errorf("stdout = %q, want the matching cheat", stdout)
+	}
+	if strings.Contains(stdout, "list files") {
+		t.Errorf("stdout = %q, want the non-matching cheat filtered out", stdout)
+	}
+}
+
+func TestQueryShorthand(t *testing.T) {
+	dir := cheatDir(t, map[string]string{
+		"a.cheat": "% shell\n# list files\nls\n# print the working directory\npwd\n",
+	})
+
+	code, stdout, _ := exec(t, "--path", dir, "--list", "-q", "pwd")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	if strings.Contains(stdout, "list files") {
+		t.Errorf("-q did not filter: %q", stdout)
+	}
+}
+
+func TestListWithNoMatchesIsAnError(t *testing.T) {
+	dir := cheatDir(t, map[string]string{"a.cheat": "% shell\n# list files\nls\n"})
+
+	code, _, stderr := exec(t, "--path", dir, "--list", "-q", "nothingmatchesthis")
+	if code != ExitError {
+		t.Errorf("exit code = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "no cheats match") {
+		t.Errorf("stderr = %q, want it to say nothing matched", stderr)
+	}
+}
+
+// Without a terminal the selector cannot run, so nav falls back to listing
+// the matches. The test suite has no controlling terminal, which is exactly
+// the situation being checked.
+func TestDefaultRunFallsBackToListingWithoutATerminal(t *testing.T) {
+	dir := cheatDir(t, map[string]string{
+		"a.cheat": "% shell\n# list files\nls\n# print the working directory\npwd\n",
+	})
+
+	code, stdout, stderr := exec(t, "--path", dir, "-q", "pwd")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "pwd") {
+		t.Errorf("stdout = %q, want the matching cheat listed", stdout)
+	}
+	if !strings.Contains(stderr, "no terminal available") {
+		t.Errorf("stderr = %q, want it to explain the fallback", stderr)
 	}
 }
 
@@ -152,5 +203,26 @@ func TestAllCheatsUnusableIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "no usable cheats") {
 		t.Errorf("stderr = %q, want it to say there are no usable cheats", stderr)
+	}
+}
+
+func TestPrintSelected(t *testing.T) {
+	var buf bytes.Buffer
+	printSelected(&buf, cheat.Cheat{
+		Tags:        []string{"git", "branch"},
+		Description: "Show the current branch",
+		Command:     "git rev-parse --abbrev-ref HEAD",
+	})
+
+	got := buf.String()
+	// The command must be on a line of its own, with no prefix, so the
+	// output can be piped into a shell or copied verbatim.
+	if !strings.Contains(got, "\ngit rev-parse --abbrev-ref HEAD\n") {
+		t.Errorf("the command is not on a bare line of its own:\n%s", got)
+	}
+	for _, want := range []string{"# Show the current branch", "# tags: git, branch"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output is missing %q:\n%s", want, got)
+		}
 	}
 }
