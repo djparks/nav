@@ -12,6 +12,7 @@ import (
 
 	"nav/internal/cheat"
 	"nav/internal/clipboard"
+	"nav/internal/config"
 	"nav/internal/runner"
 	"nav/internal/search"
 	"nav/internal/ui"
@@ -30,9 +31,8 @@ const (
 	ExitUsage = 2
 )
 
-// DefaultCheatDir is where nav looks for cheatsheets when --path is not
-// given. Making this configurable is Phase 6.
-const DefaultCheatDir = "cheats"
+// flagSource is what PathSource says when --path chose the directory.
+const flagSource = "--path"
 
 // usageError marks a problem with how the user invoked nav, as opposed to a
 // problem doing the work. It maps to ExitUsage.
@@ -102,7 +102,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	var (
 		showHelp    = fs.Bool("help", false, "show this help text and exit")
 		showVersion = fs.Bool("version", false, "print the nav version and exit")
-		path        = fs.String("path", DefaultCheatDir, "directory to load .cheat files from")
+		path        = fs.String("path", "", "directory to load .cheat files from")
 		list        = fs.Bool("list", false, "print every cheat that was loaded")
 		query       = fs.String("query", "", "search terms; pre-fills the interactive search box")
 		printOnly   = fs.Bool("print", false, "print the completed command instead of offering to run it")
@@ -137,7 +137,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return usagef("--print and --yes contradict each other: one prints the command, the other runs it")
 	}
 
-	cheats, err := cheat.LoadDir(*path)
+	dir, source, err := resolveCheatDir(*path)
+	if err != nil {
+		return err
+	}
+
+	cheats, err := cheat.LoadDir(dir)
 	// Parse problems are worth reporting even when usable cheats were found.
 	var pe cheat.ParseErrors
 	if errors.As(err, &pe) {
@@ -145,10 +150,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "nav: %s\n", p)
 		}
 		if len(cheats) == 0 {
-			return fmt.Errorf("no usable cheats in %s", *path)
+			return fmt.Errorf("no usable cheats in %s%s", dir, hint(source))
 		}
 	} else if err != nil {
-		return err
+		return fmt.Errorf("%w%s", err, hint(source))
 	}
 
 	// --list is the non-interactive path: print what matches and stop.
@@ -169,6 +174,32 @@ func run(args []string, stdout, stderr io.Writer) error {
 		mode = runWithoutAsking
 	}
 	return selectCheat(cheats, *query, mode, stdout, stderr)
+}
+
+// resolveCheatDir decides which directory to load cheatsheets from, and
+// returns a description of what decided it.
+//
+// --path wins outright; everything else is up to the config package.
+func resolveCheatDir(flagPath string) (dir, source string, err error) {
+	if flagPath != "" {
+		return flagPath, flagSource, nil
+	}
+
+	cfg, err := config.Load(config.Options{})
+	if err != nil {
+		return "", "", err
+	}
+	return cfg.Path, cfg.PathSource, nil
+}
+
+// hint names whatever chose the cheatsheet directory, so that an error about
+// a directory the user never typed says where it came from. There is nothing
+// to explain when they did type it.
+func hint(source string) string {
+	if source == "" || source == flagSource {
+		return ""
+	}
+	return " (from " + source + ")"
 }
 
 // execMode is what nav does once it has a completed command.
@@ -295,7 +326,7 @@ instead, so it can still be piped or pasted.
 Flags:
   -h, --help          show this help text and exit
   -V, --version       print the nav version and exit
-      --path <dir>    directory to load %s files from (default "%s")
+      --path <dir>    directory to load %[1]s files from
   -q, --query <text>  search terms; pre-fills the interactive search box
       --list          print matching cheats and exit, without the interactive list
       --print         print the completed command instead of offering to run it
@@ -352,13 +383,40 @@ description and command text. Every term must match, in any order, so
   nav -q 'cmd:rev-parse'      match only against the command text
   nav -q 'desc:current'       match only against the description
 
-Cheatsheet format (*%s files):
+Cheatsheet format (*%[1]s files):
   %% git, branch                       tags for the cheats that follow
   # Show the current branch name      description of the next command
   git rev-parse --abbrev-ref HEAD     the command itself
   ; this line is a comment            ignored, as are blank lines
   $ branch:                           predefined values for <branch>,
       main                            one per indented line
+
+Configuration:
+  Where nav looks for cheatsheets; the first of these that says anything wins:
+
+    --path <dir>        this flag
+    $%[2]s           a directory named in the environment
+    path = <dir>        a "path" entry in the configuration file
+    ./%[3]s            a %[3]s directory where nav is run, if there is one
+    %[4]s
+                        the per-user cheatsheet directory
+
+  The configuration file is $%[5]s when that is set, and otherwise
+
+    %[6]s
+
+  A missing file is fine; an unreadable one is not, since a file that exists
+  was clearly meant to be used. It is a list of "key = value" lines, where
+  blank lines and anything after a '#' are ignored:
+
+    # Where my cheatsheets live.
+    path = ~/cheats
+
+  A leading ~ in a value means your home directory. Nothing else is
+  expanded: a configuration file is not a shell script.
+
+  Settings:
+    path    the cheatsheet directory, the same thing --path names
 
 Exit codes:
   0  success
@@ -367,8 +425,15 @@ Exit codes:
 `
 
 func printUsage(w io.Writer) {
+	opts := config.Options{}
 	fmt.Fprint(w, strings.TrimLeft(fmt.Sprintf(usageText,
-		cheat.Extension, DefaultCheatDir, cheat.Extension), "\n"))
+		cheat.Extension,         // %[1]s
+		config.EnvPath,          // %[2]s
+		config.CheatDirName,     // %[3]s
+		config.UserPath(opts),   // %[4]s
+		config.EnvConfig,        // %[5]s
+		config.ConfigFile(opts), // %[6]s
+	), "\n"))
 }
 
 // Main is the thin wrapper main() calls.

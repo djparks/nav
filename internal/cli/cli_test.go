@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"nav/internal/cheat"
+	"nav/internal/config"
 	"nav/internal/ui"
 )
 
@@ -416,5 +417,113 @@ func TestFinishPropagatesACommandFailure(t *testing.T) {
 	}
 	if cf.status != 5 {
 		t.Errorf("status = %d, want 5", cf.status)
+	}
+}
+
+// isolateConfig points nav's configuration at a file that does not exist, so
+// tests see no environment or config file of their own machine's.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+
+	t.Setenv(config.EnvPath, "")
+	t.Setenv(config.EnvConfig, filepath.Join(t.TempDir(), "absent"))
+}
+
+func TestPathComesFromTheEnvironment(t *testing.T) {
+	isolateConfig(t)
+	dir := cheatDir(t, map[string]string{"a.cheat": "% shell\n# list files\nls\n"})
+	t.Setenv(config.EnvPath, dir)
+
+	code, stdout, stderr := exec(t, "--list")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "ls") {
+		t.Errorf("stdout = %q, want the cheat from $%s", stdout, config.EnvPath)
+	}
+}
+
+func TestPathComesFromTheConfigFile(t *testing.T) {
+	isolateConfig(t)
+	dir := cheatDir(t, map[string]string{"a.cheat": "% shell\n# print the date\ndate\n"})
+
+	file := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(file, []byte("path = "+dir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, file)
+
+	code, stdout, stderr := exec(t, "--list")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "date") {
+		t.Errorf("stdout = %q, want the cheat from the config file", stdout)
+	}
+}
+
+func TestPathFlagBeatsTheEnvironment(t *testing.T) {
+	isolateConfig(t)
+	fromFlag := cheatDir(t, map[string]string{"a.cheat": "% shell\n# from the flag\nflagged\n"})
+	fromEnv := cheatDir(t, map[string]string{"a.cheat": "% shell\n# from the environment\nenvironed\n"})
+	t.Setenv(config.EnvPath, fromEnv)
+
+	code, stdout, stderr := exec(t, "--path", fromFlag, "--list")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr)
+	}
+	if !strings.Contains(stdout, "flagged") || strings.Contains(stdout, "environed") {
+		t.Errorf("stdout = %q, want only the cheat --path names", stdout)
+	}
+}
+
+func TestABadConfigFileIsAnError(t *testing.T) {
+	isolateConfig(t)
+
+	file := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(file, []byte("colour = blue\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, file)
+
+	code, _, stderr := exec(t, "--list")
+	if code != ExitError {
+		t.Errorf("exit code = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "unknown setting") {
+		t.Errorf("stderr = %q, want it to name the unknown setting", stderr)
+	}
+}
+
+func TestMissingDirectoryFromTheEnvironmentSaysWhereItCameFrom(t *testing.T) {
+	isolateConfig(t)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	t.Setenv(config.EnvPath, missing)
+
+	code, _, stderr := exec(t, "--list")
+	if code != ExitError {
+		t.Errorf("exit code = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "$"+config.EnvPath) {
+		t.Errorf("stderr = %q, want it to blame $%s", stderr, config.EnvPath)
+	}
+}
+
+func TestHintSaysNothingAboutTheFlag(t *testing.T) {
+	if got := hint(flagSource); got != "" {
+		t.Errorf("hint(%q) = %q, want it empty: the user typed the path themselves", flagSource, got)
+	}
+	if got := hint("$NAV_PATH"); got != " (from $NAV_PATH)" {
+		t.Errorf("hint = %q, want it to name the source", got)
+	}
+}
+
+func TestHelpDescribesConfiguration(t *testing.T) {
+	_, stdout, _ := exec(t, "--help")
+
+	for _, want := range []string{"Configuration:", config.EnvPath, config.EnvConfig, "path = "} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("help output is missing %q", want)
+		}
 	}
 }

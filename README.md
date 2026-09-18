@@ -21,7 +21,7 @@ Later versions can add repository management, configuration, shell integration, 
 
 ## Current State
 
-Phases 1 to 5 are implemented, which covers the whole first milestone. Running
+Phases 1 to 6 are implemented, which covers the whole first milestone. Running
 `nav` opens an interactive list that filters as you type. Enter picks a cheat,
 nav asks for any `<variable>` values its command needs, shows the completed
 command, and runs it if you agree. Declining prints the command instead.
@@ -76,7 +76,7 @@ nav [flags]
 
   -h, --help          show this help text and exit
   -V, --version       print the nav version and exit
-      --path <dir>    directory to load .cheat files from (default "cheats")
+      --path <dir>    directory to load .cheat files from
   -q, --query <text>  search terms; pre-fills the interactive search box
       --list          print matching cheats and exit, without the interactive list
       --print         print the completed command instead of offering to run it
@@ -225,11 +225,64 @@ are exactly what this feature tends to be used for. Indentation is only
 meaningful directly below a `$` line; elsewhere it is ignored, so an indented
 command still works.
 
+### Configuration
+
+nav needs to know one thing: which directory its cheatsheets are in. Four
+things can say, and the first of them that does wins:
+
+| Source | Example |
+| --- | --- |
+| the `--path` flag | `nav --path ~/work/cheats` |
+| the `NAV_PATH` environment variable | `export NAV_PATH=~/cheats` |
+| a `path` entry in the configuration file | `path = ~/cheats` |
+| the built-in default | `./cheats` if that exists, otherwise `~/.local/share/nav/cheats` |
+
+The default looks for a `cheats` directory where nav is run before falling
+back to the per-user one, so a checkout of nav — or any project that keeps its
+own cheats next to its code — works with no setup at all.
+
+The configuration file lives at `~/.config/nav/config`, or wherever
+`$NAV_CONFIG` points. It is a list of `key = value` lines:
+
+```text
+# Where my cheatsheets live.
+path = ~/cheats
+```
+
+Blank lines are ignored, and so is anything after a `#`. There are no
+sections, no nesting and no quoting: a value is the rest of the line with the
+surrounding spaces trimmed. A leading `~` becomes your home directory;
+nothing else is expanded, because a configuration file is not a shell script.
+
+A missing configuration file is normal and silent. A file that exists but
+cannot be read or understood is an error naming the file and line, since a
+file someone wrote was clearly meant to be used. The only setting is `path`;
+an unknown key is a mistake worth reporting rather than ignoring, so it is
+reported, along with the list of keys that do exist.
+
+`$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` are honoured if set. nav uses the XDG
+layout on every platform, macOS included: it is where command-line tools are
+looked for by habit, and one documented location beats one per operating
+system.
+
+When an error concerns a directory you did not type yourself, nav says where
+the directory came from:
+
+```console
+$ NAV_PATH=~/nope nav --list
+nav: cheat directory /home/me/nope: stat /home/me/nope: no such file or directory (from $NAV_PATH)
+```
+
+Deliberately left out: `NAV_PATH` names one directory, not a list of them.
+navi accepts several, but one is enough until there is a reason for more, and
+a single directory keeps both the flag and the error messages simple.
+
 ### Project Layout
 
 ```text
 main.go                      thin wrapper around cli.Main
 internal/cli/                flag parsing, help/version, exit codes
+internal/config/             the cheatsheet directory: env, file, defaults
 internal/cheat/              the Cheat model, the parser, directory loading
 internal/search/             filtering cheats by a text query
 internal/variables/          finding and substituting <placeholder> parts
@@ -323,12 +376,36 @@ go test ./...
 
 ### Phase 6 — Configuration
 
-- [ ] Define a default cheatsheet directory
-- [ ] Allow the cheatsheet directory to be configured
-- [ ] Support an environment variable for the cheatsheet path
-- [ ] Add a simple configuration file
-- [ ] Add configuration for the preferred search command
-- [ ] Add configuration for command execution behavior
+- [x] Define a default cheatsheet directory — `./cheats` when it exists, else
+      `~/.local/share/nav/cheats`
+- [x] Allow the cheatsheet directory to be configured — `--path`
+- [x] Support an environment variable for the cheatsheet path — `NAV_PATH`
+- [x] Add a simple configuration file — `~/.config/nav/config`, or
+      `$NAV_CONFIG`, holding `key = value` lines
+
+### Phase 6a — Explain these tasks
+
+Both of these come from navi, so they are worth spelling out before deciding
+whether nav wants them.
+
+- [ ] **Add configuration for the preferred search command.** navi does not
+      draw its own list; it pipes the cheats into an external fuzzy finder —
+      `fzf` by default, with `skim` and others supported — and reads back the
+      line you chose. The setting names that program and its arguments. nav
+      draws its own list instead (Phase 3), so the equivalent here would be a
+      `finder = fzf` setting that hands selection over to an external program
+      when one is configured. That would buy fuzzy matching and the finder's
+      own key bindings, at the cost of a second selection path to maintain
+      and two ways for the list to behave.
+- [ ] **Add configuration for command execution behavior.** Defaults for what
+      Phase 5 currently decides per run: whether to ask before running
+      (`--yes`), whether to only print (`--print`), and which shell runs the
+      command (currently `$SHELL`, falling back to `/bin/sh`). As settings
+      they would be something like `confirm = false`, `print = true` and
+      `shell = /bin/bash`. The useful part is `shell`: someone whose `$SHELL`
+      is `fish` may still want their cheats run by `bash`. Turning the
+      confirmation off by default is a sharper edge — it makes a stray Enter
+      run a command — so it should be opt-in and stay so.
 
 ### Phase 7 — Cheat Repositories
 
