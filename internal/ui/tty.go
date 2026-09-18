@@ -25,17 +25,33 @@ type Outcome struct {
 	// Selected is true when the user picked a cheat and supplied every
 	// value it needed. It is false if they quit at either step.
 	Selected bool
+	// Run is true when the user confirmed that the command should be
+	// executed. It is always false when InteractOptions.Confirm was false.
+	Run bool
 	// Copied is true if the user copied a command to the clipboard.
 	Copied bool
 }
 
-// Interact runs the whole terminal flow: pick a cheat from the list, then
-// fill in any `<variable>` placeholders its command contains.
+// InteractOptions configures an interactive session.
+type InteractOptions struct {
+	// Query pre-fills the search box.
+	Query string
+	// Copy puts text on the clipboard, or is nil when no clipboard tool was
+	// found.
+	Copy func(string) error
+	// Confirm asks, as a last step, whether the completed command should be
+	// run. When false the session ends as soon as the command is complete.
+	Confirm bool
+}
+
+// Interact runs the whole terminal flow: pick a cheat from the list, fill in
+// any `<variable>` placeholders its command contains, and optionally confirm
+// that it should be run.
 //
 // It deliberately talks to /dev/tty rather than to stdin and stdout, so the
 // selector still works when nav's output is being piped somewhere — which is
 // how the completed command gets used.
-func Interact(cheats []cheat.Cheat, query string, copyFn func(string) error) (Outcome, error) {
+func Interact(cheats []cheat.Cheat, opts InteractOptions) (Outcome, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return Outcome{}, ErrNoTerminal
@@ -70,8 +86,8 @@ func Interact(cheats []cheat.Cheat, query string, copyFn func(string) error) (Ou
 	// Input is left unset: keys come from kr, not from Options.
 	result, err := runSelector(kr, cheats, Options{
 		Output: tty,
-		Query:  query,
-		Copy:   copyFn,
+		Query:  opts.Query,
+		Copy:   opts.Copy,
 		Size:   size,
 	})
 	if err != nil || !result.Selected {
@@ -86,12 +102,30 @@ func Interact(cheats []cheat.Cheat, query string, copyFn func(string) error) (Ou
 		return Outcome{Copied: result.Copied}, nil
 	}
 
-	return Outcome{
+	outcome := Outcome{
 		Cheat:    result.Cheat,
 		Command:  command,
 		Selected: true,
 		Copied:   result.Copied,
-	}, nil
+	}
+
+	if opts.Confirm {
+		// Asking on the alternate screen keeps the whole flow in one place.
+		// The screen is restored immediately afterwards, so the command's
+		// output lands on the user's normal terminal, not over the top of
+		// nav's own drawing.
+		outcome.Run, err = runConfirm(kr, ConfirmOptions{
+			Output:      tty,
+			Command:     command,
+			Description: result.Cheat.Description,
+			Size:        size,
+		})
+		if err != nil {
+			return Outcome{Copied: result.Copied}, err
+		}
+	}
+
+	return outcome, nil
 }
 
 // fill prompts for every variable in c's command and returns the completed

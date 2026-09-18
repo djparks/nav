@@ -21,10 +21,10 @@ Later versions can add repository management, configuration, shell integration, 
 
 ## Current State
 
-Phases 1 to 4 are implemented. Running `nav` opens an interactive list that
-filters as you type. Enter picks a cheat, nav asks for any `<variable>` values
-its command needs, and the completed command is printed. Executing it
-(Phase 5) is next, so for now the command is printed for you to run yourself.
+Phases 1 to 5 are implemented, which covers the whole first milestone. Running
+`nav` opens an interactive list that filters as you type. Enter picks a cheat,
+nav asks for any `<variable>` values its command needs, shows the completed
+command, and runs it if you agree. Declining prints the command instead.
 
 ```text
 Search: docker
@@ -57,6 +57,18 @@ format:
 variable 1 of 1   1 of 4   ↑↓ move   ⏎ accept   esc cancel
 ```
 
+With every value supplied, nav shows the finished command and asks:
+
+```text
+Command:
+  # List running containers in the chosen output format
+  docker ps --format "table {{.Names}}\t{{.Status}}"
+
+Run it? [y/N]
+
+y run   n or esc do not run, print the command instead
+```
+
 ### Usage
 
 ```text
@@ -67,9 +79,13 @@ nav [flags]
       --path <dir>    directory to load .cheat files from (default "cheats")
   -q, --query <text>  search terms; pre-fills the interactive search box
       --list          print matching cheats and exit, without the interactive list
+      --print         print the completed command instead of offering to run it
+  -y, --yes           run the completed command without asking
 ```
 
-Exit codes: `0` success, `1` error, `2` incorrect usage.
+Exit codes: `0` success, `1` error, `2` incorrect usage. Once a command has
+run, nav exits with *its* status instead, so a `1` or `2` after execution came
+from the command rather than from nav.
 
 ### Keys in the Interactive List
 
@@ -108,6 +124,45 @@ being mistaken for a variable — `sort < in > out`, `diff <(a) <(b)` and
 Predefined values are optional. A variable that has them gets a filterable
 list; one that does not gets a text box. Typing a value the list does not
 contain is allowed — predefined values are suggestions, not a restriction.
+
+### Running Commands
+
+The finished command is shown in full — wrapped, never truncated, since it is
+what you are agreeing to — and runs only if you answer `y`. Anything else
+declines, including Enter, `n` and Esc, because running a command that was not
+asked for is the one outcome worth going out of the way to avoid. Declining
+still prints the command, so nothing is lost.
+
+Commands run with `$SHELL -c`, falling back to `/bin/sh` when `$SHELL` is
+unset, so pipes, redirections, quoting and `&&` behave as they would if you
+typed the command yourself. Note that `-c` does not read your shell's start-up
+files, so aliases and shell functions are **not** available — a cheat that
+depends on one will not work.
+
+The command inherits nav's own standard input and output, so it can prompt,
+page and colour its output normally; `git rebase -i` and `docker logs -f` work
+as expected. nav then exits with the command's status, and reports 130 if you
+interrupt it with `Ctrl-C`. While a command runs, nav ignores `Ctrl-C` itself
+so the signal reaches the command and nav survives to report what happened.
+
+A command that fails has already explained itself on its own stderr, so nav
+adds nothing and simply passes the status on.
+
+Two flags opt out of the question:
+
+```sh
+nav --print -q 'docker images'   # never asks, never runs: just print it
+nav --yes   -q 'docker images'   # run it without asking
+```
+
+`--print` is the one to use when piping nav's output — `nav --print -q docker |
+pbcopy` works because the interactive list draws on `/dev/tty` while stdout
+stays free for the command text. The two flags contradict each other and nav
+rejects them together.
+
+When nav runs a command itself, the command text is echoed to stderr rather
+than stdout, so `nav --yes -q ... > out.txt` captures only the command's own
+output.
 
 ### Searching
 
@@ -178,6 +233,7 @@ internal/cli/                flag parsing, help/version, exit codes
 internal/cheat/              the Cheat model, the parser, directory loading
 internal/search/             filtering cheats by a text query
 internal/variables/          finding and substituting <placeholder> parts
+internal/runner/             running a command and reporting its exit status
 internal/ui/                 the interactive screens and their key decoder
 internal/term/               raw terminal mode and window size
 internal/clipboard/          copying text to the system clipboard
@@ -258,12 +314,12 @@ go test ./...
 
 ### Phase 5 — Execute Commands
 
-- [ ] Display the completed command before execution
-- [ ] Ask for confirmation before execution
-- [ ] Execute the completed command
-- [ ] Return the command's exit status
-- [ ] Display command output
-- [ ] Handle command failures cleanly
+- [x] Display the completed command before execution
+- [x] Ask for confirmation before execution
+- [x] Execute the completed command
+- [x] Return the command's exit status
+- [x] Display command output
+- [x] Handle command failures cleanly
 
 ### Phase 6 — Configuration
 

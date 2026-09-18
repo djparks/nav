@@ -2,12 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"nav/internal/cheat"
+	"nav/internal/ui"
 )
 
 // exec runs nav with the given args and returns the exit code, stdout and stderr.
@@ -244,5 +247,174 @@ func TestPrintSelectedShowsTheFilledCommand(t *testing.T) {
 	}
 	if strings.Contains(got, "<format>") {
 		t.Errorf("output still contains the placeholder:\n%s", got)
+	}
+}
+
+func TestPrintAndYesContradict(t *testing.T) {
+	dir := cheatDir(t, map[string]string{"a.cheat": "% shell\n# list files\nls\n"})
+
+	code, _, stderr := exec(t, "--path", dir, "--print", "--yes")
+	if code != ExitUsage {
+		t.Errorf("exit code = %d, want %d", code, ExitUsage)
+	}
+	if !strings.Contains(stderr, "contradict") {
+		t.Errorf("stderr = %q, want it to explain the conflict", stderr)
+	}
+}
+
+func TestExecuteReportsSuccess(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := execute("echo ran-ok", &stdout, &stderr); err != nil {
+		t.Fatalf("execute returned an error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "ran-ok") {
+		t.Errorf("stdout = %q, want the command's output", stdout.String())
+	}
+	// The command is echoed to stderr, so stdout carries only its output and
+	// `nav --yes ... > file` stays useful.
+	if !strings.Contains(stderr.String(), "echo ran-ok") {
+		t.Errorf("stderr = %q, want the command echoed to it", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "echo ran-ok") {
+		t.Errorf("stdout = %q, want it free of nav's own banner", stdout.String())
+	}
+}
+
+func TestExecutePropagatesExitStatus(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := execute("exit 7", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("execute succeeded, want a failure carrying the exit status")
+	}
+
+	var cf *commandFailed
+	if !errors.As(err, &cf) {
+		t.Fatalf("error is %T, want *commandFailed", err)
+	}
+	if cf.status != 7 {
+		t.Errorf("status = %d, want 7", cf.status)
+	}
+}
+
+// A failing command has already explained itself on its own stderr, so nav
+// exits with its status and adds nothing of its own.
+func TestExitCodeOfAFailedCommandIsItsStatusAndIsQuiet(t *testing.T) {
+	var stderr bytes.Buffer
+	if got := exitCode(&commandFailed{status: 7}, &stderr); got != 7 {
+		t.Errorf("exit code = %d, want 7", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("nav added its own complaint on top of the command's: %q", stderr.String())
+	}
+}
+
+func TestExitCodeMapping(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		want      int
+		wantNoisy bool
+	}{
+		{"success", nil, ExitOK, false},
+		{"help", flag.ErrHelp, ExitOK, false},
+		{"plain error", errors.New("boom"), ExitError, true},
+		{"usage error", usagef("bad flag"), ExitUsage, true},
+		{"command status 1", &commandFailed{status: 1}, 1, false},
+		{"command status 130", &commandFailed{status: 130}, 130, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if got := exitCode(tt.err, &stderr); got != tt.want {
+				t.Errorf("exit code = %d, want %d", got, tt.want)
+			}
+			if noisy := stderr.Len() > 0; noisy != tt.wantNoisy {
+				t.Errorf("wrote to stderr = %v, want %v (%q)", noisy, tt.wantNoisy, stderr.String())
+			}
+		})
+	}
+}
+
+func TestCommandFailedMessage(t *testing.T) {
+	e := &commandFailed{status: 3}
+	if !strings.Contains(e.Error(), "3") {
+		t.Errorf("Error() = %q, want it to mention the status", e.Error())
+	}
+}
+
+// finish is where the run-or-print decision is made, and it is the part of
+// the flow a terminal is not needed for.
+func TestFinish(t *testing.T) {
+	selected := ui.Outcome{
+		Cheat:    cheat.Cheat{Tags: []string{"demo"}, Description: "Say hi"},
+		Command:  "echo hi-there",
+		Selected: true,
+	}
+	confirmed := selected
+	confirmed.Run = true
+
+	tests := []struct {
+		name        string
+		outcome     ui.Outcome
+		mode        execMode
+		wantRan     bool
+		wantPrinted bool
+	}{
+		{"declined prints the command", selected, askFirst, false, true},
+		{"confirmed runs it", confirmed, askFirst, true, false},
+		{"--yes runs without a confirmation", selected, runWithoutAsking, true, false},
+		{"--print only prints", selected, printOnce, false, true},
+		{"nothing selected does neither", ui.Outcome{}, askFirst, false, false},
+		{"--yes with nothing selected runs nothing", ui.Outcome{}, runWithoutAsking, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := finish(tt.outcome, tt.mode, &stdout, &stderr); err != nil {
+				t.Fatalf("finish returned an error: %v", err)
+			}
+
+			ran := strings.Contains(stdout.String(), "hi-there") &&
+				!strings.Contains(stdout.String(), "echo hi-there")
+			if ran != tt.wantRan {
+				t.Errorf("ran = %v, want %v (stdout %q, stderr %q)",
+					ran, tt.wantRan, stdout.String(), stderr.String())
+			}
+
+			printed := strings.Contains(stdout.String(), "echo hi-there")
+			if printed != tt.wantPrinted {
+				t.Errorf("printed = %v, want %v (stdout %q)", printed, tt.wantPrinted, stdout.String())
+			}
+		})
+	}
+}
+
+func TestFinishReportsACopyWhenQuitting(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := finish(ui.Outcome{Copied: true}, askFirst, &stdout, &stderr); err != nil {
+		t.Fatalf("finish returned an error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "copied to the clipboard") {
+		t.Errorf("stderr = %q, want it to confirm the copy", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed when no cheat was selected", stdout.String())
+	}
+}
+
+func TestFinishPropagatesACommandFailure(t *testing.T) {
+	outcome := ui.Outcome{Command: "exit 5", Selected: true, Run: true}
+
+	var stdout, stderr bytes.Buffer
+	err := finish(outcome, askFirst, &stdout, &stderr)
+
+	var cf *commandFailed
+	if !errors.As(err, &cf) {
+		t.Fatalf("error is %T (%v), want *commandFailed", err, err)
+	}
+	if cf.status != 5 {
+		t.Errorf("status = %d, want 5", cf.status)
 	}
 }

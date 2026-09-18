@@ -12,6 +12,7 @@ import (
 
 	"nav/internal/cheat"
 	"nav/internal/clipboard"
+	"nav/internal/runner"
 	"nav/internal/search"
 	"nav/internal/ui"
 )
@@ -44,27 +45,52 @@ func usagef(format string, args ...any) error {
 	return &usageError{fmt.Errorf(format, args...)}
 }
 
+// commandFailed carries the exit status of a command nav ran, so Run can
+// exit with it.
+//
+// It is not really an error on nav's part: the command ran and said what was
+// wrong on its own stderr. Run therefore passes the status on without
+// printing anything of its own.
+type commandFailed struct{ status int }
+
+func (e *commandFailed) Error() string {
+	return fmt.Sprintf("command exited with status %d", e.status)
+}
+
 // Run executes nav with the given arguments (not including the program name)
 // and returns a process exit code. stdout receives normal output, stderr
 // receives errors, so tests can capture both.
 func Run(args []string, stdout, stderr io.Writer) int {
-	err := run(args, stdout, stderr)
+	return exitCode(run(args, stdout, stderr), stderr)
+}
+
+// exitCode turns the outcome of a run into a process exit code, reporting
+// the error on stderr when there is something worth saying.
+func exitCode(err error, stderr io.Writer) int {
 	switch {
 	case err == nil:
 		return ExitOK
+
 	case errors.Is(err, flag.ErrHelp):
 		// --help was requested: not an error.
 		return ExitOK
-	default:
-		fmt.Fprintf(stderr, "nav: %s\n", err)
-
-		var ue *usageError
-		if errors.As(err, &ue) {
-			fmt.Fprintf(stderr, "\nRun 'nav --help' for usage.\n")
-			return ExitUsage
-		}
-		return ExitError
 	}
+
+	// A command that ran and failed has already reported itself on its own
+	// stderr, so nav adds nothing and just passes the status on.
+	var cf *commandFailed
+	if errors.As(err, &cf) {
+		return cf.status
+	}
+
+	fmt.Fprintf(stderr, "nav: %s\n", err)
+
+	var ue *usageError
+	if errors.As(err, &ue) {
+		fmt.Fprintf(stderr, "\nRun 'nav --help' for usage.\n")
+		return ExitUsage
+	}
+	return ExitError
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
@@ -79,10 +105,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 		path        = fs.String("path", DefaultCheatDir, "directory to load .cheat files from")
 		list        = fs.Bool("list", false, "print every cheat that was loaded")
 		query       = fs.String("query", "", "search terms; pre-fills the interactive search box")
+		printOnly   = fs.Bool("print", false, "print the completed command instead of offering to run it")
+		assumeYes   = fs.Bool("yes", false, "run the completed command without asking")
 	)
 	fs.BoolVar(showHelp, "h", false, "shorthand for --help")
 	fs.BoolVar(showVersion, "V", false, "shorthand for --version")
 	fs.StringVar(query, "q", "", "shorthand for --query")
+	fs.BoolVar(assumeYes, "y", false, "shorthand for --yes")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) { // -h handled by flag itself
@@ -103,6 +132,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	if rest := fs.Args(); len(rest) > 0 {
 		return usagef("unexpected argument %q", rest[0])
+	}
+	if *printOnly && *assumeYes {
+		return usagef("--print and --yes contradict each other: one prints the command, the other runs it")
 	}
 
 	cheats, err := cheat.LoadDir(*path)
@@ -129,19 +161,39 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 
-	return selectCheat(cheats, *query, stdout, stderr)
+	mode := askFirst
+	switch {
+	case *printOnly:
+		mode = printOnce
+	case *assumeYes:
+		mode = runWithoutAsking
+	}
+	return selectCheat(cheats, *query, mode, stdout, stderr)
 }
 
-// selectCheat runs the interactive selector and prints whatever the user
-// chose. With no terminal to draw on it degrades to listing the matches, so
-// `nav -q docker | ...` still does something sensible.
-func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) error {
+// execMode is what nav does once it has a completed command.
+type execMode int
+
+const (
+	askFirst         execMode = iota // show it and ask whether to run it
+	runWithoutAsking                 // run it straight away (--yes)
+	printOnce                        // only print it (--print)
+)
+
+// selectCheat runs the interactive session and then either runs the chosen
+// command or prints it. With no terminal to draw on it degrades to listing
+// the matches, so `nav -q docker | ...` still does something sensible.
+func selectCheat(cheats []cheat.Cheat, query string, mode execMode, stdout, stderr io.Writer) error {
 	var copyFn func(string) error
 	if clipboard.Available() {
 		copyFn = clipboard.Copy
 	}
 
-	outcome, err := ui.Interact(cheats, query, copyFn)
+	outcome, err := ui.Interact(cheats, ui.InteractOptions{
+		Query:   query,
+		Copy:    copyFn,
+		Confirm: mode == askFirst,
+	})
 	if errors.Is(err, ui.ErrNoTerminal) {
 		matches := search.Filter(cheats, query)
 		if len(matches) == 0 {
@@ -155,6 +207,12 @@ func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) e
 		return err
 	}
 
+	return finish(outcome, mode, stdout, stderr)
+}
+
+// finish acts on the end of an interactive session: run the completed
+// command, or print it.
+func finish(outcome ui.Outcome, mode execMode, stdout, stderr io.Writer) error {
 	if !outcome.Selected {
 		// Quitting is a normal way to leave the selector, not a failure.
 		if outcome.Copied {
@@ -163,7 +221,40 @@ func selectCheat(cheats []cheat.Cheat, query string, stdout, stderr io.Writer) e
 		return nil
 	}
 
+	// --yes skips the question, so no confirmation took place and the flag
+	// itself is the answer.
+	if mode == runWithoutAsking || outcome.Run {
+		return execute(outcome.Command, stdout, stderr)
+	}
+
+	// Either --print was given, or the user declined to run it. Printing the
+	// command is still useful: it can be piped, copied or pasted.
 	printSelected(stdout, outcome.Cheat, outcome.Command)
+	return nil
+}
+
+// execute runs the completed command, showing it first so there is a record
+// of what produced the output that follows.
+//
+// The command inherits nav's own streams, so it can page, colour and prompt
+// exactly as it would if the user had typed it. Its exit status becomes
+// nav's, which is why a failure is returned as a commandFailed rather than
+// as an ordinary error.
+func execute(command string, stdout, stderr io.Writer) error {
+	// The banner goes to stderr so that stdout carries only the command's
+	// own output, keeping `nav --yes -q ... > file` useful.
+	fmt.Fprintf(stderr, "%s\n", command)
+
+	status, err := runner.Run(command, runner.Options{
+		Stdout: stdout,
+		Stderr: stderr,
+	})
+	if err != nil {
+		return err
+	}
+	if status != 0 {
+		return &commandFailed{status: status}
+	}
 	return nil
 }
 
@@ -197,8 +288,9 @@ Usage:
   nav [flags]
 
 Running nav with no flags opens an interactive list that filters as you type.
-Pick a cheat with Enter and nav asks for any <variable> values its command
-needs, then prints the completed command.
+Pick a cheat with Enter, answer any <variable> prompts, and nav shows the
+completed command and asks whether to run it. Declining prints the command
+instead, so it can still be piped or pasted.
 
 Flags:
   -h, --help          show this help text and exit
@@ -206,6 +298,23 @@ Flags:
       --path <dir>    directory to load %s files from (default "%s")
   -q, --query <text>  search terms; pre-fills the interactive search box
       --list          print matching cheats and exit, without the interactive list
+      --print         print the completed command instead of offering to run it
+  -y, --yes           run the completed command without asking
+
+Running commands:
+  The command is shown in full and run only if you answer y; anything else
+  declines. It is run with "$SHELL -c", or /bin/sh when $SHELL is unset, so
+  pipes, redirections and quoting work as they would if you typed it. Note
+  that -c does not read your shell's start-up files, so aliases and shell
+  functions are not available.
+
+  The command inherits nav's own input and output, so it can prompt, page and
+  colour its output normally. nav then exits with the command's exit status,
+  and with 130 if you interrupt it. Because of that, an exit status of 1 or 2
+  after a command has run came from the command, not from nav.
+
+  --print never asks and never runs anything, which is what you want in a
+  script or when piping nav's output somewhere. --yes runs without asking.
 
 Keys in the interactive list:
   type              filter the list
